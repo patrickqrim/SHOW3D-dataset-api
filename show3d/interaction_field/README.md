@@ -19,8 +19,9 @@ schema, and the local evaluator.
 * **Declare your input view** (single-view = headset0 only, multi-view = both
   headsets; see [below](#single-view-or-multi-view)).
 * **Declare external training data.** Training on other datasets (for example,
-  ARCTIC) is allowed, but submissions with and without external data are ranked
-  separately, so you must declare what you used.
+  ARCTIC) is allowed, but you must declare what you used. The live Codabench
+  leaderboard is combined; organizers publish separate final tables for methods
+  with and without external training data.
 
 ## Quickstart
 
@@ -64,16 +65,6 @@ The demo writes `predictions.jsonl` and scores it with the official ADE /
 accuracy evaluator. For fast training, pre-extract frames with
 `show3d.extract_images --manifest show3d/interaction_field/train_manifest_202607.jsonl`
 (the shipped list of training recordings; see the top-level README).
-
-### Trained reference baseline (InterField)
-
-A complete, trained reference baseline — the InterField model (after ARCTIC): a
-single-image ResNet-50 regressor with train/predict/evaluate/visualize scripts and
-a checkpoint — lives in [`baseline/`](baseline/). It reaches a mean ADE of
-60.5 mm (recall 1.0, acc@100mm 0.86) on a **held-out split of the training
-subjects** (the official test-subject labels are withheld, so this is a
-cross-subject generalization estimate, not a test-set number); see
-[`baseline/RESULTS.md`](baseline/RESULTS.md) for the full setup and numbers.
 
 ## Training set
 
@@ -159,8 +150,8 @@ object-side field.
 ```
 
 **Predict both hands.** You do not know at test time which hands have a valid
-target, so a missing or `null` field only lowers your recall (see
-[Evaluation](#evaluation)) -- use `null` solely to abstain.
+target, so a missing or `null` field lowers recall and affects the official
+ranking (see [Evaluation](#evaluation)).
 
 **2. Produce it.** Run your model over the test manifest and write the file:
 
@@ -215,11 +206,13 @@ two hands:
   coverage stays visible and abstaining does not hide.
 
 A prediction whose shape is not `(21, 3)` (wrong joint count) is rejected. The
-final leaderboard ranking accounts for both accuracy and coverage, so omitting
-hard frames does not pay off.
+final leaderboard ranking uses a withheld aggregate of accuracy and coverage,
+so omitting hard frames does not pay off. The leaderboard shows its
+`official_score`, but the formula is not disclosed.
 
-`evaluate_submission_jsonl(dataset, "predictions.jsonl")` reproduces this scoring
-offline.
+`evaluate_submission_jsonl(dataset, "predictions.jsonl")` reproduces the public
+ADE, accuracy, and recall metrics offline; the official ranking aggregate is
+server-side only.
 
 ## Single-view or multi-view
 
@@ -243,12 +236,15 @@ get only `video_path`.
 
 ## Frame validity
 
-Some frames have unreliable ground truth: `frame_data.headset_tracking_valid` is
-`False` when headset tracking failed and the pose was interpolated (the released
-`is_synthesized` flag). On those frames the synthesized `t_world_from_camera` is
-withheld (`None`) and the dataset builds no target (`labels=None`), so you can't
-train on them by accident. Use `example.is_valid` for the full check: it ANDs
-headset tracking with a valid object pose and at least one valid hand.
+Some frames have unreliable ground truth. `frame_data.headset_pose_valid` is
+the frame-level verdict from the calibration release. The dataset builds no
+target (`labels=None`) when it is false. Use `example.is_valid` for the full
+check: it also requires a valid object pose and at least one valid hand.
+
+`frame_data.headset_tracking_valid` remains available for compatibility. It
+uses the legacy `is_synthesized` flag and can disagree with the release verdict.
+The projection and visualization helpers use the accepted pose when the file
+declares pose contract version 1.
 
 ## Object geometry (self-contained)
 

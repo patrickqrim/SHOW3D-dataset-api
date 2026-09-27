@@ -48,8 +48,12 @@ class Show3DDatasetTest(unittest.TestCase):
             self.assertEqual(calibration.fx, 450.0)
             self.assertEqual(calibration.image_width, 1024)
             np.testing.assert_allclose(calibration.t_world_from_camera, np.eye(4))
+            self.assertEqual(calibration.pose_source, "legacy_unspecified")
+            self.assertTrue(calibration.is_pose_valid)
+            self.assertIsNone(calibration.pose_contract_version)
             self.assertIsNotNone(item.views["headset1"].calibration)
             self.assertTrue(item.headset_tracking_valid)
+            self.assertTrue(item.headset_pose_valid)
             self.assertEqual(item.frame_info_path.name, "frame_info.json")
             self.assertIsNotNone(item.object_pose)
             self.assertIsNotNone(item.left_hand)
@@ -113,10 +117,202 @@ class Show3DDatasetTest(unittest.TestCase):
             calibration = item.views["headset0"].calibration
             assert calibration is not None
             self.assertTrue(calibration.is_synthesized)
+            self.assertEqual(calibration.pose_source, "legacy_interpolation")
+            self.assertFalse(calibration.is_pose_valid)
             self.assertIsNone(calibration.t_world_from_camera)
+            self.assertFalse(item.headset_pose_valid)
+
+    def test_explicit_pose_contract_uses_validity_gate(self) -> None:
+        scenarios = (
+            ("mocap", False, True),
+            ("mocap", True, True),
+            ("mocap", False, False),
+        )
+        for pose_source, is_synthesized, is_pose_valid in scenarios:
+            with (
+                self.subTest(
+                    pose_source=pose_source,
+                    is_synthesized=is_synthesized,
+                    is_pose_valid=is_pose_valid,
+                ),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                frame = Show3DFrameRef(
+                    subject_id="S001",
+                    scene_id="mug_grab_a1b2",
+                    frame_index=0,
+                    object_alias="mug",
+                )
+                manifest_path = root / "frames.jsonl"
+                write_frame_manifest_jsonl(manifest_path, [frame])
+                self._write_scene_files(
+                    root,
+                    frame,
+                    is_synthesized=is_synthesized,
+                    pose_source=pose_source,
+                    is_pose_valid=is_pose_valid,
+                    pose_contract_version=1,
+                )
+
+                item = Show3DDataset.from_manifest_jsonl(root, manifest_path)[0]
+
+                calibration = item.views["headset0"].calibration
+                assert calibration is not None
+                self.assertEqual(item.headset_tracking_valid, not is_synthesized)
+                self.assertEqual(item.headset_pose_valid, is_pose_valid)
+                self.assertEqual(calibration.pose_source, pose_source)
+                self.assertEqual(calibration.is_pose_valid, is_pose_valid)
+                self.assertEqual(calibration.pose_contract_version, 1)
+                if is_pose_valid:
+                    np.testing.assert_allclose(
+                        calibration.t_world_from_camera, np.eye(4)
+                    )
+                else:
+                    self.assertIsNone(calibration.t_world_from_camera)
+
+    def test_missing_secondary_calibration_keeps_headset_pose_valid(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            frame = Show3DFrameRef(
+                subject_id="S001",
+                scene_id="mug_grab_a1b2",
+                frame_index=0,
+                object_alias="mug",
+            )
+            manifest_path = root / "frames.jsonl"
+            write_frame_manifest_jsonl(manifest_path, [frame])
+            self._write_scene_files(root, frame)
+            (
+                root
+                / "scenes"
+                / frame.subject_id
+                / frame.scene_id
+                / "camera_calibration"
+                / "headset1.json"
+            ).unlink()
+
+            item = Show3DDataset.from_manifest_jsonl(root, manifest_path)[0]
+
+            self.assertTrue(item.headset_tracking_valid)
+            self.assertTrue(item.headset_pose_valid)
+
+    def test_pose_contract_rejects_malformed_contracts(self) -> None:
+        scenarios = (
+            (2, "mocap", True, "Unsupported calibration pose_contract_version"),
+            (None, "mocap", True, "require pose_contract_version 1"),
+        )
+        for version, pose_source, is_pose_valid, error_pattern in scenarios:
+            with (
+                self.subTest(version=version, pose_source=pose_source),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                frame = Show3DFrameRef(
+                    subject_id="S001",
+                    scene_id="mug_grab_a1b2",
+                    frame_index=0,
+                    object_alias="mug",
+                )
+                manifest_path = root / "frames.jsonl"
+                write_frame_manifest_jsonl(manifest_path, [frame])
+                self._write_scene_files(
+                    root,
+                    frame,
+                    pose_source=pose_source,
+                    is_pose_valid=is_pose_valid,
+                    pose_contract_version=version,
+                )
+
+                with self.assertRaisesRegex(ValueError, error_pattern):
+                    Show3DDataset.from_manifest_jsonl(root, manifest_path)[0]
+
+    def test_valid_headset_pose_can_have_missing_camera_transform(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            frame = Show3DFrameRef(
+                subject_id="S001",
+                scene_id="mug_grab_a1b2",
+                frame_index=0,
+                object_alias="mug",
+            )
+            manifest_path = root / "frames.jsonl"
+            write_frame_manifest_jsonl(manifest_path, [frame])
+            self._write_scene_files(
+                root,
+                frame,
+                pose_source="mocap",
+                is_pose_valid=True,
+                pose_contract_version=1,
+            )
+            calibration_path = (
+                root
+                / "scenes"
+                / frame.subject_id
+                / frame.scene_id
+                / "camera_calibration"
+                / "headset0.json"
+            )
+            payload = json.loads(calibration_path.read_text())
+            payload["T_WorldFromCamera_by_index"]["0"]["T_WorldFromCamera"] = None
+            calibration_path.write_text(json.dumps(payload))
+
+            item = Show3DDataset.from_manifest_jsonl(root, manifest_path)[0]
+
+            calibration = item.views["headset0"].calibration
+            assert calibration is not None
+            self.assertTrue(calibration.is_pose_valid)
+            self.assertIsNone(calibration.t_world_from_camera)
+            self.assertTrue(item.headset_pose_valid)
+
+    def test_unversioned_calibration_keeps_the_legacy_reading(self) -> None:
+        # Released files predate the contract: a kept frame parses its matrix
+        # permissively, and a synthesized frame skips it.
+        scenarios: dict[str, tuple[int, object, bool]] = {
+            "kept": (0, [[1.0, 0.0], [0.0, 1.0]], True),
+            "synthesized": (1, {"malformed": "matrix"}, False),
+        }
+        for name, (is_synthesized, transform, is_pose_valid) in scenarios.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                frame = Show3DFrameRef(
+                    subject_id="S001",
+                    scene_id="mug_grab_a1b2",
+                    frame_index=0,
+                    object_alias="mug",
+                )
+                manifest_path = root / "frames.jsonl"
+                write_frame_manifest_jsonl(manifest_path, [frame])
+                self._write_scene_files(
+                    root,
+                    frame,
+                    is_synthesized=is_synthesized,
+                    transform=transform,
+                )
+
+                item = Show3DDataset.from_manifest_jsonl(root, manifest_path)[0]
+
+                calibration = item.views["headset0"].calibration
+                assert calibration is not None
+                self.assertEqual(calibration.is_synthesized, bool(is_synthesized))
+                self.assertEqual(calibration.is_pose_valid, is_pose_valid)
+                if is_pose_valid:
+                    np.testing.assert_allclose(
+                        calibration.t_world_from_camera, transform
+                    )
+                else:
+                    self.assertIsNone(calibration.t_world_from_camera)
 
     def _write_scene_files(
-        self, root: Path, frame: Show3DFrameRef, *, is_synthesized: bool = False
+        self,
+        root: Path,
+        frame: Show3DFrameRef,
+        *,
+        is_synthesized: object = False,
+        pose_source: str | None = None,
+        is_pose_valid: bool | None = None,
+        pose_contract_version: int | None = None,
+        transform: object | None = None,
     ) -> None:
         scene_dir = root / "scenes" / frame.subject_id / frame.scene_id
         scene_dir.mkdir(parents=True)
@@ -131,27 +327,30 @@ class Show3DDatasetTest(unittest.TestCase):
             [0.0, 0.0, 1.0, 0.0],
             [0.0, 0.0, 0.0, 1.0],
         ]
+        entry: dict[str, object] = {
+            "index": 0,
+            "T_WorldFromCamera": identity if transform is None else transform,
+            "is_synthesized": is_synthesized,
+        }
+        if pose_source is not None:
+            entry["pose_source"] = pose_source
+        if is_pose_valid is not None:
+            entry["is_pose_valid"] = is_pose_valid
+        payload: dict[str, object] = {
+            "ImageSizeX": 1024,
+            "ImageSizeY": 1280,
+            "fx": 450.0,
+            "fy": 450.0,
+            "cx": 512.0,
+            "cy": 640.0,
+            "DistortionModel": "PinholePlane",
+            "T_WorldFromCamera_by_index": {"0": entry},
+        }
+        if pose_contract_version is not None:
+            payload["pose_contract_version"] = pose_contract_version
         for name in ("headset0", "headset1"):
             with (calibration_dir / f"{name}.json").open("w") as f:
-                json.dump(
-                    {
-                        "ImageSizeX": 1024,
-                        "ImageSizeY": 1280,
-                        "fx": 450.0,
-                        "fy": 450.0,
-                        "cx": 512.0,
-                        "cy": 640.0,
-                        "DistortionModel": "PinholePlane",
-                        "T_WorldFromCamera_by_index": {
-                            "0": {
-                                "index": 0,
-                                "T_WorldFromCamera": identity,
-                                "is_synthesized": is_synthesized,
-                            }
-                        },
-                    },
-                    f,
-                )
+                json.dump(payload, f)
 
         metadata_dir = scene_dir / "metadata"
         metadata_dir.mkdir()

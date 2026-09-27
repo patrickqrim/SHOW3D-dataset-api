@@ -277,7 +277,7 @@ def render_overlay(
         raise ValueError(f"view {view_name!r} has no calibration to overlay")
     calibration = view.calibration
     if calibration.t_world_from_camera is None:
-        raise ValueError(f"view {view_name!r} has no extrinsic (synthesized frame)")
+        raise ValueError(f"view {view_name!r} has no valid t_world_from_camera")
 
     fig = Figure(figsize=(8, 8 * calibration.image_height / calibration.image_width))
     ax: Any = fig.add_subplot()

@@ -20,7 +20,7 @@ import struct
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import cast, Literal
 
 import cv2
 import numpy as np
@@ -28,12 +28,22 @@ from numpy.typing import NDArray
 
 
 FloatArray = NDArray[np.float64]
+CalibrationPoseSource = Literal[
+    "mocap",
+    "vio",
+    "endpoint_interpolation",
+    "smooth_mocap_interpolation",
+    "legacy_interpolation",
+    "legacy_unspecified",
+]
 
 DEFAULT_VIDEO_FPS: float = 60.0
 DEFAULT_CONFIDENCE_THRESHOLD: float = 0.5
 DEFAULT_HAND_POSE_VERSION: str = "v2"
 DEFAULT_OBJECT_POSE_VERSION: str = "v1"
 EGOCENTRIC_VIEWS: tuple[str, str] = ("headset0", "headset1")
+POSE_CONTRACT_VERSION: int = 1
+RIGID_TRANSFORM_TOLERANCE: float = 1e-4
 
 LEFT_HAND_ID: str = "0"
 RIGHT_HAND_ID: str = "1"
@@ -137,11 +147,9 @@ class HandPoseFrame:
 class CameraCalibration:
     """Pinhole calibration for one view at one frame.
 
-    Videos are fisheye-undistorted, so intrinsics are a plain pinhole
-    (``fx, fy, cx, cy``). ``t_world_from_camera`` is the 4x4 world-from-camera
-    transform for this frame, or ``None`` when the frame has no pose or the
-    headset pose was synthesized. ``is_synthesized`` is True when the headset pose
-    was interpolated because tracking failed on this frame.
+    ``t_world_from_camera`` is ``None`` when this camera's transform is missing
+    or the frame-level headset pose is invalid. ``is_synthesized`` retains its
+    legacy meaning; ``is_pose_valid`` is the version 1 headset-pose verdict.
     """
 
     fx: float
@@ -152,6 +160,9 @@ class CameraCalibration:
     image_height: int
     t_world_from_camera: FloatArray | None
     is_synthesized: bool
+    pose_source: CalibrationPoseSource = "legacy_unspecified"
+    is_pose_valid: bool = False
+    pose_contract_version: int | None = None
 
 
 @dataclass(frozen=True)
@@ -185,9 +196,19 @@ class Show3DFrameData:
     object_pose: ObjectPoseFrame | None
     left_hand: HandPoseFrame | None
     right_hand: HandPoseFrame | None
-    # False when the headset pose on this frame was synthesized/interpolated
-    # (tracking failed): the frame's world-space poses are unreliable.
+    # Preserves the legacy aggregate over `is_synthesized` for compatibility.
     headset_tracking_valid: bool
+
+    @property
+    def headset_pose_valid(self) -> bool:
+        """Frame-level headset-pose validity."""
+        # Both camera files repeat this frame-level field; headset0 is canonical.
+        headset_view = self.views.get(EGOCENTRIC_VIEWS[0])
+        return (
+            headset_view is not None
+            and headset_view.calibration is not None
+            and headset_view.calibration.is_pose_valid
+        )
 
 
 class Show3DPaths:
@@ -438,6 +459,85 @@ def default_object_mesh_provider() -> Callable[[str], FloatArray | None]:
     return load_object_mesh
 
 
+def _rigid_transform_from_json(value: object) -> FloatArray | None:
+    if value is None:
+        return None
+    try:
+        matrix = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError) as error:
+        raise ValueError("Calibration transform must be numeric") from error
+    if matrix.shape != (4, 4) or not np.all(np.isfinite(matrix)):
+        raise ValueError("Calibration transform must be a finite 4x4 matrix")
+    if not np.allclose(
+        matrix[3],
+        np.asarray([0.0, 0.0, 0.0, 1.0]),
+        rtol=0.0,
+        atol=RIGID_TRANSFORM_TOLERANCE,
+    ):
+        raise ValueError("Calibration transform must be rigid")
+    rotation = matrix[:3, :3]
+    if not np.allclose(
+        rotation.T @ rotation,
+        np.eye(3),
+        rtol=0.0,
+        atol=RIGID_TRANSFORM_TOLERANCE,
+    ) or not np.isclose(
+        np.linalg.det(rotation),
+        1.0,
+        rtol=0.0,
+        atol=RIGID_TRANSFORM_TOLERANCE,
+    ):
+        raise ValueError("Calibration transform must be rigid")
+    return matrix
+
+
+def _pose_contract_version(data: Mapping[str, object]) -> int | None:
+    if "pose_contract_version" not in data:
+        return None
+    value = data["pose_contract_version"]
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or value != POSE_CONTRACT_VERSION
+    ):
+        raise ValueError(f"Unsupported calibration pose_contract_version: {value}")
+    return value
+
+
+def _pose_contract_fields(
+    entry: Mapping[str, object],
+    is_synthesized: bool,
+    contract_version: int | None,
+) -> tuple[CalibrationPoseSource, bool]:
+    raw_pose_source = entry.get("pose_source")
+    raw_pose_valid = entry.get("is_pose_valid")
+    has_contract_fields = "pose_source" in entry or "is_pose_valid" in entry
+    if contract_version is None:
+        if has_contract_fields:
+            raise ValueError(
+                "Calibration pose_source and is_pose_valid require "
+                "pose_contract_version 1"
+            )
+        return (
+            "legacy_interpolation" if is_synthesized else "legacy_unspecified",
+            not is_synthesized,
+        )
+    if raw_pose_source is None or not isinstance(raw_pose_valid, bool):
+        raise ValueError(
+            "Calibration pose contract v1 requires pose_source and is_pose_valid"
+        )
+    if raw_pose_source in {
+        "mocap",
+        "vio",
+        "endpoint_interpolation",
+        "smooth_mocap_interpolation",
+        "legacy_unspecified",
+    }:
+        return cast(CalibrationPoseSource, raw_pose_source), raw_pose_valid
+    else:
+        raise ValueError(f"Unknown calibration pose_source: {raw_pose_source}")
+
+
 def load_camera_calibration(
     path: str | Path,
     frame_index: int,
@@ -449,19 +549,41 @@ def load_camera_calibration(
     if not cal_path.exists():
         return None
     data = _load_json_mapping(cal_path, cache)
+    pose_contract_version = _pose_contract_version(data)
     t_world_from_camera: FloatArray | None = None
     is_synthesized = False
+    pose_source: CalibrationPoseSource = "legacy_unspecified"
+    is_pose_valid = False
     by_index = data.get("T_WorldFromCamera_by_index")
     if isinstance(by_index, dict):
         raw_entry = by_index.get(str(frame_index))
         if isinstance(raw_entry, dict):
             entry = cast(dict[str, object], raw_entry)
-            is_synthesized = bool(entry.get("is_synthesized", False))
+            raw_is_synthesized = entry.get("is_synthesized", False)
+            if pose_contract_version is None:
+                is_synthesized = bool(raw_is_synthesized)
+            else:
+                if "is_synthesized" not in entry or not isinstance(
+                    raw_is_synthesized, bool
+                ):
+                    raise ValueError("Calibration is_synthesized must be a boolean")
+                is_synthesized = raw_is_synthesized
+            pose_source, is_pose_valid = _pose_contract_fields(
+                entry,
+                is_synthesized,
+                pose_contract_version,
+            )
             matrix = entry.get("T_WorldFromCamera")
-            # A synthesized pose is interpolated, not really tracked -- withhold it
-            # so callers cannot accidentally use an unreliable extrinsic.
-            if matrix is not None and not is_synthesized:
-                t_world_from_camera = np.asarray(matrix, dtype=np.float64)
+            if pose_contract_version is None:
+                matrix_array = (
+                    np.asarray(matrix, dtype=np.float64)
+                    if matrix is not None and not is_synthesized
+                    else None
+                )
+            else:
+                matrix_array = _rigid_transform_from_json(matrix)
+            if is_pose_valid and matrix_array is not None:
+                t_world_from_camera = matrix_array
     return CameraCalibration(
         fx=_optional_float(data, "fx", 0.0),
         fy=_optional_float(data, "fy", 0.0),
@@ -471,6 +593,9 @@ def load_camera_calibration(
         image_height=_required_int(data, "ImageSizeY"),
         t_world_from_camera=t_world_from_camera,
         is_synthesized=is_synthesized,
+        pose_source=pose_source,
+        is_pose_valid=is_pose_valid,
+        pose_contract_version=pose_contract_version,
     )
 
 

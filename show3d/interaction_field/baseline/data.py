@@ -29,7 +29,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from ...dataset import Show3DPaths, _load_json_mapping
+from ...dataset import Show3DPaths, load_camera_calibration
 from ...dataset import Show3DFrameRef
 from .model import IMAGENET_MEAN, IMAGENET_STD, NUM_JOINTS
 
@@ -38,19 +38,10 @@ def _read_rotation_world_from_camera(
     calib_path: Path, frame_index: int, cache: dict
 ) -> np.ndarray | None:
     """The 3x3 world-from-camera rotation for a frame, or None if unavailable."""
-    if not calib_path.exists():
+    calibration = load_camera_calibration(calib_path, frame_index, cache=cache)
+    if calibration is None or calibration.t_world_from_camera is None:
         return None
-    data = _load_json_mapping(calib_path, cache)
-    by_index = data.get("T_WorldFromCamera_by_index")
-    if not isinstance(by_index, dict):
-        return None
-    entry = by_index.get(str(frame_index))
-    if not isinstance(entry, dict) or entry.get("is_synthesized", False):
-        return None
-    matrix = entry.get("T_WorldFromCamera")
-    if matrix is None:
-        return None
-    return np.asarray(matrix, dtype=np.float64)[:3, :3]
+    return np.asarray(calibration.t_world_from_camera, dtype=np.float64)[:3, :3]
 
 
 class InterFieldFrameDataset(Dataset):

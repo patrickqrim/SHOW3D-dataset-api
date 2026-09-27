@@ -44,11 +44,12 @@ def project_to_image(
 ) -> tuple[FloatArray, NDArray[np.bool_]]:
     """Project world-mm points to pixels; return ``(uv, valid)`` (both length N).
 
-    Raises if the frame has no extrinsic (headset tracking was synthesized).
+    Raises if the frame has no valid ``t_world_from_camera``.
     """
-    if calibration.t_world_from_camera is None:
-        raise ValueError("frame has no world-from-camera extrinsic (synthesized)")
-    cam = world_to_camera(points_world_mm, calibration.t_world_from_camera)
+    t_world_from_camera = calibration.t_world_from_camera
+    if t_world_from_camera is None:
+        raise ValueError("frame has no valid t_world_from_camera")
+    cam = world_to_camera(points_world_mm, t_world_from_camera)
     z = cam[:, 2]
     safe_z = np.where(z > 0.0, z, np.nan)
     u = calibration.fx * cam[:, 0] / safe_z + calibration.cx

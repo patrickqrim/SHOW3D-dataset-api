@@ -153,11 +153,15 @@ class InteractionFieldExample:
         return self.frame_data.headset_tracking_valid
 
     @property
+    def headset_pose_valid(self) -> bool:
+        """Frame-level headset-pose validity."""
+        return self.frame_data.headset_pose_valid
+
+    @property
     def is_valid(self) -> bool:
-        """True when this frame is usable: headset tracking succeeded AND the
-        object pose and at least one hand are valid (a target exists)."""
+        """Whether the camera, object, and at least one hand form a valid target."""
         return (
-            self.frame_data.headset_tracking_valid
+            self.frame_data.headset_pose_valid
             and self.labels is not None
             and self.labels.is_valid
         )
@@ -179,13 +183,23 @@ class PredictionRecord:
     fields: dict[str, FloatArray]
 
     @classmethod
-    def from_json(cls, row: Mapping[str, object]) -> "PredictionRecord":
+    def from_json(
+        cls,
+        row: Mapping[str, object],
+        *,
+        require_shape: bool = True,
+    ) -> "PredictionRecord":
         sample_id = _required_str(row, "sample_id")
         fields: dict[str, FloatArray] = {}
         for field_name in FIELD_NAMES:
             value = row.get(field_name)
             if value is not None:
-                fields[field_name] = array_from_json(value, columns=3)
+                fields[field_name] = _prediction_array_from_json(
+                    value,
+                    sample_id=sample_id,
+                    field_name=field_name,
+                    require_shape=require_shape,
+                )
         return cls(sample_id=sample_id, fields=fields)
 
     def to_json(self) -> dict[str, object]:
@@ -327,9 +341,9 @@ class Show3DInteractionFieldDataset:
         sample = self.samples[index]
         frame_data = self._dataset[index]
         labels: InteractionFieldLabels | None = None
-        # Skip targets on frames where headset tracking failed -- their world-space
-        # poses are unreliable, so callers cannot train on them by accident.
-        if self.load_labels and frame_data.headset_tracking_valid:
+        # The explicit release verdict protects world-space labels on both repaired
+        # poses and legacy source gaps.
+        if self.load_labels and frame_data.headset_pose_valid:
             object_pose = frame_data.object_pose
             object_vertices_world_mm: FloatArray | None = None
             object_confidence = 0.0
@@ -510,7 +524,11 @@ def nearest_neighbor_vectors(
     return target_points[nearest] - source_points
 
 
-def read_submission_jsonl(path: str | Path) -> dict[str, PredictionRecord]:
+def read_submission_jsonl(
+    path: str | Path,
+    *,
+    require_shape: bool = True,
+) -> dict[str, PredictionRecord]:
     records: dict[str, PredictionRecord] = {}
     with Path(path).open() as f:
         for line_number, line in enumerate(f, start=1):
@@ -520,7 +538,10 @@ def read_submission_jsonl(path: str | Path) -> dict[str, PredictionRecord]:
             raw = json.loads(stripped)
             if not isinstance(raw, dict):
                 raise ValueError(f"Submission line {line_number} is not a JSON object")
-            record = PredictionRecord.from_json(cast(dict[str, object], raw))
+            record = PredictionRecord.from_json(
+                cast(dict[str, object], raw),
+                require_shape=require_shape,
+            )
             if record.sample_id in records:
                 raise ValueError(
                     f"Duplicate prediction for sample_id={record.sample_id}"
@@ -544,7 +565,7 @@ class SubmissionReport:
 
     num_manifest_samples: int
     num_matched_samples: int
-    missing_sample_ids: list[str]  # manifest ids with no prediction (lowers recall)
+    missing_sample_ids: list[str]  # manifest ids with no prediction
     unknown_sample_ids: list[str]  # submission ids not in the manifest
     left_predicted: int
     right_predicted: int
@@ -554,7 +575,7 @@ class SubmissionReport:
     def ok(self) -> bool:
         """True when the submission is safe to upload: no unknown ``sample_id``s
         and every field is ``(NUM_HAND_LANDMARKS, 3)``. Missing predictions are
-        allowed (they only lower recall)."""
+        allowed, but lower recall and affect the official ranking."""
         return not self.unknown_sample_ids and not self.malformed_fields
 
 
@@ -565,13 +586,12 @@ def validate_submission(
 
     Invalid (``report.ok is False``): a ``sample_id`` not in the manifest, or a
     field that is not ``(NUM_HAND_LANDMARKS, 3)``. Missing predictions are
-    reported but allowed -- they lower recall, and the challenge asks you to
-    predict both hands, so a missing field is only worth it as a deliberate
-    abstention.
+    reported but allowed. They lower recall and affect the official ranking, so
+    participants should predict both hands.
     """
     manifest_ids = [sample.sample_id for sample in read_manifest_jsonl(manifest_path)]
     manifest_set = set(manifest_ids)
-    predictions = read_submission_jsonl(submission_path)
+    predictions = read_submission_jsonl(submission_path, require_shape=False)
 
     unknown = sorted(set(predictions) - manifest_set)
     missing = [sid for sid in manifest_ids if sid not in predictions]
@@ -590,11 +610,9 @@ def validate_submission(
                 left += 1
             else:
                 right += 1
-            if value.shape != (NUM_HAND_LANDMARKS, 3):
-                malformed.append(
-                    f"{sid}.{field_name}: expected ({NUM_HAND_LANDMARKS}, 3), "
-                    f"got {tuple(value.shape)}"
-                )
+            shape_error = _prediction_shape_error(sid, field_name, value)
+            if shape_error is not None:
+                malformed.append(shape_error)
     return SubmissionReport(
         num_manifest_samples=len(manifest_ids),
         num_matched_samples=len(manifest_set & set(predictions)),
@@ -702,10 +720,13 @@ def evaluate_predictions(
         if example.labels is None:
             if not dataset.load_labels:
                 raise ValueError("Dataset must be constructed with load_labels=True")
-            # Tracking-invalid frame: no reference target to score against.
-            continue
+            # Keep tracking-invalid manifest rows in the reference sample space;
+            # their empty labels make every submitted field a no-op.
+            labels = InteractionFieldLabels()
+        else:
+            labels = example.labels
         references.append(
-            LabelRecord(sample_id=example.sample.sample_id, labels=example.labels)
+            LabelRecord(sample_id=example.sample.sample_id, labels=labels)
         )
     return evaluate_prediction_records(
         references,
@@ -720,6 +741,16 @@ def evaluate_prediction_records(
     *,
     accuracy_thresholds_mm: tuple[float, ...] = (10.0, 50.0, 100.0),
 ) -> EvaluationResult:
+    for prediction in predictions.values():
+        for field_name, value in prediction.fields.items():
+            shape_error = _prediction_shape_error(
+                prediction.sample_id,
+                field_name,
+                value,
+            )
+            if shape_error is not None:
+                raise ValueError(shape_error)
+
     accumulators = {
         field_name: _MetricAccumulator(accuracy_thresholds_mm)
         for field_name in FIELD_NAMES
@@ -741,6 +772,10 @@ def evaluate_prediction_records(
                 prediction.fields[field_name],
                 target,
             )
+    unknown_sample_ids = set(predictions) - seen_sample_ids
+    if unknown_sample_ids:
+        sample_id = sorted(unknown_sample_ids)[0]
+        raise ValueError(f"Prediction contains unknown sample_id: {sample_id}")
     return EvaluationResult(
         fields={
             field_name: accumulator.to_metric()
@@ -812,6 +847,48 @@ def _labels_from_json(row: Mapping[str, object]) -> InteractionFieldLabels:
     return InteractionFieldLabels(
         left_to_object=values[LEFT_TO_OBJECT],
         right_to_object=values[RIGHT_TO_OBJECT],
+    )
+
+
+def _prediction_array_from_json(
+    value: object,
+    *,
+    sample_id: str,
+    field_name: str,
+    require_shape: bool,
+) -> FloatArray:
+    if not isinstance(value, list):
+        raise ValueError(f"{sample_id}.{field_name} must be a list")
+    if require_shape and len(value) != NUM_HAND_LANDMARKS:
+        raise ValueError(
+            f"{sample_id}.{field_name} must contain {NUM_HAND_LANDMARKS} vectors, "
+            f"got {len(value)}"
+        )
+    for index, vector in enumerate(value):
+        if not isinstance(vector, list) or len(vector) != 3:
+            raise ValueError(f"{sample_id}.{field_name}[{index}] must be a 3-vector")
+        for coordinate in vector:
+            if isinstance(coordinate, bool) or not isinstance(coordinate, (int, float)):
+                raise ValueError(
+                    f"{sample_id}.{field_name}[{index}] contains a non-number"
+                )
+            if not math.isfinite(float(coordinate)):
+                raise ValueError(
+                    f"{sample_id}.{field_name}[{index}] contains a non-finite value"
+                )
+    return array_from_json(value, columns=3)
+
+
+def _prediction_shape_error(
+    sample_id: str,
+    field_name: str,
+    value: FloatArray,
+) -> str | None:
+    if value.shape == (NUM_HAND_LANDMARKS, 3):
+        return None
+    return (
+        f"{sample_id}.{field_name}: expected ({NUM_HAND_LANDMARKS}, 3), "
+        f"got {tuple(value.shape)}"
     )
 
 

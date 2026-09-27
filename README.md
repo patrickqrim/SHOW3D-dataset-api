@@ -1,4 +1,4 @@
-# SHOW3D Dataset API
+# SHOW3D dataset API
 
 Standalone Python starter APIs for the SHOW3D dataset
 (`facebook/show3d-dataset`) and the Interaction Field Estimation Challenge at the
@@ -50,6 +50,22 @@ The loader expects the released on-disk layout under `root`:
 ├── object_pose/<version>/scenes/<subject>/<scene>/object_pose.json
 └── hand_pose/<version>/scenes/<subject>/<scene>/hand_pose.json
 ```
+
+### Headset pose validity
+
+`is_synthesized` still means that interpolation produced the pose.
+
+- **Unversioned:** The loader returns `t_world_from_camera` when it exists and
+  `is_synthesized=false`.
+- **Version 1:** The loader returns `t_world_from_camera` when it exists and
+  `is_pose_valid=true`. `pose_source` records `mocap`, `vio`,
+  `endpoint_interpolation`, `smooth_mocap_interpolation`, or
+  `legacy_unspecified`.
+- `Show3DFrameData.headset_pose_valid` reports frame-level headset-pose
+  validity.
+
+Older loaders read only `is_synthesized`. Pin the data and loader revisions to
+keep the same frame set.
 
 ## Interaction Field Estimation challenge
 
