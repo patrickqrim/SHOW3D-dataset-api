@@ -122,6 +122,11 @@ python -m show3d.demo_viz --root /path/to/show3d --scene ISH822/aria_inspecting_
     --model mhr --asset-dir /path/to/mhr/assets --video --num-frames 300 --out mhr.mp4
 ```
 
+Frame 600 of that scene, cropped to the hands, in UmeTrack and MHR (left hand
+orange, right hand cyan):
+
+![hand meshes](docs/hand_mesh.png)
+
 Each model needs its own packages and files. `pip install -r requirements.txt`
 leaves these packages out; pymomentum-cpu needs Python 3.12 or 3.13.
 
@@ -146,8 +151,10 @@ scene = HandMeshScene("/path/to/show3d", "ISH822", "aria_inspecting_3ab0", "mano
 mesh = scene.mesh(600, RIGHT_SLOT)
 ```
 
-`mesh` is None when the hand is missing, its confidence is 0.5 or lower, or, for
-UmeTrack, the frame has no world geometry.
+`mesh` is None when the hand is missing, its confidence is 0.1 (the accept gate)
+or lower, or, for UmeTrack, the frame has no world geometry. Pass
+`confidence_threshold=0.5` for the high-confidence gate that the challenge labels
+use.
 
 ## Extracting frames for training
 

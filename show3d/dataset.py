@@ -36,7 +36,10 @@ CalibrationPoseSource = Literal[
 ]
 
 DEFAULT_VIDEO_FPS: float = 60.0
+# The high-confidence gate, for labels and training data.
 DEFAULT_CONFIDENCE_THRESHOLD: float = 0.5
+# The accept gate for hand poses.
+ACCEPT_CONFIDENCE_THRESHOLD: float = 0.1
 DEFAULT_HAND_POSE_VERSION: str = "v2"
 # hand_pose versions whose per-scene UmeTrack file is `hand_pose.json`; from v3
 # on it is `hand_pose_umetrack.json`, next to the other hand models' files.

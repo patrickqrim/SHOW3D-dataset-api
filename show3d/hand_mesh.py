@@ -39,7 +39,7 @@ from typing import cast, Protocol
 import numpy as np
 from numpy.typing import NDArray
 
-from .dataset import DEFAULT_CONFIDENCE_THRESHOLD, FloatArray, LEGACY_HAND_POSE_VERSIONS
+from .dataset import ACCEPT_CONFIDENCE_THRESHOLD, FloatArray, LEGACY_HAND_POSE_VERSIONS
 
 HAND_MODELS: tuple[str, ...] = ("umetrack", "mano", "mhr")
 # MANO and MHR ship from hand_pose v3 on.
@@ -94,7 +94,7 @@ class HandMeshScene:
         *,
         asset_dir: str | Path | None = None,
         version: str = DEFAULT_MESH_HAND_POSE_VERSION,
-        confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
+        confidence_threshold: float = ACCEPT_CONFIDENCE_THRESHOLD,
     ) -> None:
         if model not in HAND_MODELS:
             raise ValueError(f"model must be one of {HAND_MODELS}, got {model!r}")
