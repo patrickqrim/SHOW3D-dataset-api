@@ -122,7 +122,7 @@ python -m show3d.demo_viz --root /path/to/show3d --scene ISH822/aria_inspecting_
     --model mhr --asset-dir /path/to/mhr/assets --video --num-frames 300 --out mhr.mp4
 ```
 
-Frame 600 of that scene, cropped to the hands, in UmeTrack and MHR (left hand
+Frame 600 of that scene, cropped to the hands, in MANO and MHR (left hand
 orange, right hand cyan):
 
 ![hand meshes](docs/hand_mesh.png)
