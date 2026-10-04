@@ -12,8 +12,8 @@
         --manifest test_manifest_5fps_202607.jsonl --submission predictions.jsonl
 
 Exits non-zero if the submission has a ``sample_id`` not in the manifest or a
-field that is not ``(21, 3)``. Missing predictions are reported but allowed --
-they only lower recall (the challenge asks you to predict both hands).
+field that is not ``(21, 3)``. Missing predictions are reported but allowed;
+they lower recall and affect the official ranking.
 """
 
 from __future__ import annotations
@@ -48,7 +48,8 @@ def main() -> None:
         f"(left {report.left_predicted}, right {report.right_predicted})"
     )
     print(
-        f"missing prediction: {len(report.missing_sample_ids)} (allowed; lowers recall)"
+        f"missing prediction: {len(report.missing_sample_ids)} "
+        "(allowed; lowers recall and affects official ranking)"
     )
     if report.unknown_sample_ids:
         preview = ", ".join(report.unknown_sample_ids[:3])

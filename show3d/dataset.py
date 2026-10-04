@@ -4,8 +4,6 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
-# pyre-strict 
-
 """Generic dataloader helpers for the SHOW3D public starter repo.
 
 This module knows the released dataset layout and annotation schemas, but it is
@@ -40,6 +38,9 @@ CalibrationPoseSource = Literal[
 DEFAULT_VIDEO_FPS: float = 60.0
 DEFAULT_CONFIDENCE_THRESHOLD: float = 0.5
 DEFAULT_HAND_POSE_VERSION: str = "v2"
+# hand_pose versions whose per-scene UmeTrack file is `hand_pose.json`; from v3
+# on it is `hand_pose_umetrack.json`, next to the other hand models' files.
+LEGACY_HAND_POSE_VERSIONS: frozenset[str] = frozenset({"v1", "v2"})
 DEFAULT_OBJECT_POSE_VERSION: str = "v1"
 EGOCENTRIC_VIEWS: tuple[str, str] = ("headset0", "headset1")
 POSE_CONTRACT_VERSION: int = 1
@@ -257,7 +258,11 @@ class Show3DPaths:
             / "scenes"
             / frame.subject_id
             / frame.scene_id
-            / "hand_pose.json"
+            / (
+                "hand_pose.json"
+                if self.hand_pose_version in LEGACY_HAND_POSE_VERSIONS
+                else "hand_pose_umetrack.json"
+            )
         )
 
 

@@ -48,8 +48,15 @@ The loader expects the released on-disk layout under `root`:
 │   ├── camera_calibration/headset{0,1}.json   # intrinsics + per-frame pose
 │   └── metadata/frame_info.json
 ├── object_pose/<version>/scenes/<subject>/<scene>/object_pose.json
-└── hand_pose/<version>/scenes/<subject>/<scene>/hand_pose.json
+└── hand_pose/
+    ├── <version>/scenes/<subject>/<scene>/hand_pose_umetrack.json   # v1, v2: hand_pose.json
+    └── hand_profiles/<subject>/profile_umetrack.json
 ```
+
+From hand_pose v3 on, each scene also has `hand_pose_mano.json` and
+`hand_pose_mhr.json`, and each subject has `profile_mano.json` and
+`profile_mhr.json`. The loader picks the UmeTrack file name from
+`hand_pose_version`.
 
 ### Headset pose validity
 
@@ -99,6 +106,49 @@ interaction field, arrows from each hand joint to the nearest object point.
 
 ![field](docs/field.png)
 
+## Render hand meshes
+
+From hand_pose v3 on, every hand-frame with world geometry comes in three hand
+models: UmeTrack (the native solve), MANO and MHR. `show3d.hand_mesh` poses each
+of them in the scene's world frame, and `demo_viz --model` draws the meshes on a
+headset frame, or on a frame range with `--video`:
+
+```bash
+python -m show3d.demo_viz --root /path/to/show3d --scene ISH822/aria_inspecting_3ab0 \
+    --model umetrack --frame 600 --out umetrack.png
+python -m show3d.demo_viz --root /path/to/show3d --scene ISH822/aria_inspecting_3ab0 \
+    --model mano --asset-dir /path/to/mano/models --frame 600 --out mano.png
+python -m show3d.demo_viz --root /path/to/show3d --scene ISH822/aria_inspecting_3ab0 \
+    --model mhr --asset-dir /path/to/mhr/assets --video --num-frames 300 --out mhr.mp4
+```
+
+Each model needs its own packages and files. `pip install -r requirements.txt`
+leaves these packages out; pymomentum-cpu needs Python 3.12 or 3.13.
+
+- **UmeTrack:** `pip install torch projectaria-tools`, and put the `hot3d/`
+  folder of [HOT3D](https://github.com/facebookresearch/hot3d) on `PYTHONPATH`.
+  HOT3D's UmeTrack loader poses the mesh. hand_pose v2 works too, with
+  `--hand-pose-version v2`.
+- **MANO:** `pip install torch smplx`, with `MANO_LEFT.pkl` and `MANO_RIGHT.pkl`
+  from [MANO](https://mano.is.tue.mpg.de) in the `--asset-dir` folder. smplx
+  loads them without chumpy only after their chumpy objects are removed with
+  smplx's `tools/clean_ch.py`, which runs under Python 2 with chumpy installed.
+- **MHR:** `pip install torch mhr pymomentum-cpu`, with the asset folder of
+  [MHR](https://github.com/facebookresearch/MHR) as `--asset-dir`.
+
+The same meshes from Python, as world-frame vertices in mm with their faces:
+
+```python
+from show3d.hand_mesh import HandMeshScene, RIGHT_SLOT
+
+scene = HandMeshScene("/path/to/show3d", "ISH822", "aria_inspecting_3ab0", "mano",
+                      asset_dir="/path/to/mano/models")
+mesh = scene.mesh(600, RIGHT_SLOT)
+```
+
+`mesh` is None when the hand is missing, its confidence is 0.5 or lower, or, for
+UmeTrack, the frame has no world geometry.
+
 ## Extracting frames for training
 
 Training straight from the MP4s is decode-bound (random per-frame seeking is
@@ -125,7 +175,8 @@ show3d/
 ├── dataset.py                    # generic SHOW3D dataloader API
 ├── camera.py                     # pinhole projection helpers
 ├── viz.py                        # drawing / rendering library
-├── demo_viz.py                   # visualization CLI (overlay / geometry / field)
+├── demo_viz.py                   # visualization CLI (overlay / geometry / field / hand meshes)
+├── hand_mesh.py                  # posed hand meshes; one hand_mesh_<model>.py per hand model
 ├── extract_images.py             # pre-extract frames (+ labels) at a chosen fps
 ├── interaction_field/
 │   ├── README.md                 # the challenge: task, baseline, train, submit, eval
